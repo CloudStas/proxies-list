@@ -1,0 +1,4 @@
+https://proxy1.example.com
+https://proxy2.example.com
+https://learn.iloveai67.org
+https://backup-proxy.com
