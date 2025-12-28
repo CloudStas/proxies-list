@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Proxy</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+    #proxyFrame {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+    }
+    #status {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.7);
+      color: white;
+      padding: 10px 15px;
+      border-radius: 5px;
+      font-family: monospace;
+      font-size: 12px;
+      z-index: 9999;
+      max-width: 400px;
+    }
+  </style>
+</head>
+<body>
+  <iframe id="proxyFrame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-popups-to-escape-sandbox allow-downloads allow-top-navigation"></iframe>
+  <div id="status">Initializing...</div>
+  <script>
+    const proxyFrame = document.getElementById('proxyFrame');
+    const statusDiv = document.getElementById('status');
+   
+    const PROXY_LIST_SOURCES = [
+        'https://raw.githubusercontent.com/CloudStas/proxies-list/main/proxies.txt',
+        'https://cdn.jsdelivr.net/gh/CloudStas/proxies-list@main/proxies.txt'
+    ];
+    let proxyList = [];
+    let currentProxyIndex = 0;
+    let targetUrl = '';
+    let loadSuccess = false;
+    let attemptCount = 0;
+
+    const _d = (s) => {
+      let r = '';
+      for (let i = 0; i < s.length; i++) {
+        r += String.fromCharCode(s.charCodeAt(i) ^ ((i % 7) + 42));
+      }
+      return r;
+    };
+    const _p = (e) => {
+      try {
+        const d = _d(atob(e));
+        return d.split('\n').map(l => l.trim()).filter(l => l && l.match(/^https?:\/\//)).map(p => p.replace(/\/$/, ''));
+      } catch (e) {
+        return [];
+      }
+    };
+
+    function updateStatus(msg) {
+      statusDiv.textContent = msg;
+      console.log(msg);
+    }
+    async function fetchProxyLists() {
+      updateStatus('Fetching proxy lists...');
+      const proxies = new Set();
+      for (const source of PROXY_LIST_SOURCES) {
+        try {
+          const response = await fetch(source);
+          if (response.ok) {
+            const text = await response.text();
+            // Decrypt the fetched base64
+            const decryptedProxies = _p(text.trim());
+            decryptedProxies.forEach(proxy => proxies.add(proxy));
+            console.log(`Loaded ${decryptedProxies.length} proxies from ${source}`);
+          }
+        } catch (e) {
+          console.warn(`Failed to fetch from ${source}:`, e.message);
+        }
+      }
+      proxyList = Array.from(proxies);
+     
+      if (proxyList.length === 0) {
+        updateStatus('No proxies loaded');
+        proxyList = [];
+      }
+      updateStatus(`Loaded ${proxyList.length} proxies`);
+      return proxyList;
+    }
+    function getTargetUrl() {
+      const params = new URLSearchParams(window.location.search);
+      const urlParam = params.get('url');
+     
+      if (urlParam) return urlParam;
+      const hash = window.location.hash.substring(1);
+      if (hash) return decodeURIComponent(hash);
+      return 'google.com';
+    }
+    async function tryProxy(proxy, url) {
+      attemptCount++;
+      const proxyName = proxy.replace(/^https?:\/\//, '');
+      updateStatus(`[${attemptCount}/${proxyList.length}] ${proxyName}`);
+      return new Promise((resolve) => {
+        let resolved = false;
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            console.log(`Timeout: ${proxy}`);
+            resolve(false);
+          }
+        }, 5000);
+        const proxyUrl = `${proxy}/#${encodeURIComponent(url)}`;
+        console.log(`Trying: ${proxyUrl}`);
+        proxyFrame.src = proxyUrl;
+        const loadHandler = () => {
+          setTimeout(() => {
+            if (resolved) return;
+           
+            try {
+              const iframeDoc = proxyFrame.contentDocument || proxyFrame.contentWindow.document;
+             
+              if (iframeDoc && iframeDoc.body) {
+                const bodyHTML = iframeDoc.body.innerHTML || '';
+               
+                if (bodyHTML.includes('404') || bodyHTML.trim().length < 50) {
+                  console.log('Error page detected');
+                  if (!resolved) {
+                    resolved = true;
+                    clearTimeout(timeout);
+                    resolve(false);
+                  }
+                  return;
+                }
+               
+                if (!resolved) {
+                  resolved = true;
+                  clearTimeout(timeout);
+                  console.log('✓ Success (verified)');
+                  resolve(true);
+                }
+              }
+            } catch (e) {
+              setTimeout(() => {
+                if (!resolved) {
+                  resolved = true;
+                  clearTimeout(timeout);
+                  console.log('✓ Success (cross-origin)');
+                  resolve(true);
+                }
+              }, 1500);
+            }
+          }, 800);
+        };
+        const errorHandler = () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('Load error');
+            resolve(false);
+          }
+        };
+        proxyFrame.removeEventListener('load', loadHandler);
+        proxyFrame.removeEventListener('error', errorHandler);
+        proxyFrame.addEventListener('load', loadHandler, { once: true });
+        proxyFrame.addEventListener('error', errorHandler, { once: true });
+      });
+    }
+    async function tryAllProxies() {
+      for (let i = 0; i < proxyList.length; i++) {
+        if (loadSuccess) break;
+       
+        currentProxyIndex = i;
+        const proxy = proxyList[i];
+        const success = await tryProxy(proxy, targetUrl);
+       
+        if (success) {
+          loadSuccess = true;
+          updateStatus(`✓ Connected: ${proxy.replace(/^https?:\/\//, '')}`);
+          setTimeout(() => statusDiv.style.display = 'none', 3000);
+          break;
+        }
+      }
+      if (!loadSuccess) {
+        updateStatus('All proxies failed');
+        setTimeout(() => {
+          document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#666;text-align:center;padding:20px;"><div><h2>Unable to Connect</h2><p>Could not connect through any available proxy.</p><p style="margin-top:20px;"><button onclick="location.reload()" style="padding:10px 20px;font-size:16px;cursor:pointer;">Retry</button></p></div></div>';
+        }, 1000);
+      }
+    }
+    async function init() {
+      targetUrl = getTargetUrl();
+      updateStatus(`Target: ${targetUrl}`);
+      await fetchProxyLists();
+     
+      if (proxyList.length === 0) {
+        updateStatus('No proxies available');
+        return;
+      }
+      loadSuccess = false;
+      attemptCount = 0;
+      await tryAllProxies();
+    }
+    init();
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'navigate') {
+        targetUrl = event.data.url;
+        currentProxyIndex = 0;
+        loadSuccess = false;
+        attemptCount = 0;
+        statusDiv.style.display = 'block';
+        tryAllProxies();
+      }
+    });
+  </script>
+</body>
+</html>
